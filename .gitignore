@@ -1,0 +1,16 @@
+# Datasets — download from https://zenodo.org/record/1214456
+data/raw/
+data/train/
+data/val/
+data/test/
+
+# Model checkpoints — too large for GitHub
+checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pth
+
+# Mac system files
+.DS_Store
