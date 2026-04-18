@@ -350,8 +350,8 @@ These are planned for after the training pipeline is complete. Do not implement 
 Dataset:         [ ] Downloaded NCT-CRC-HE-100K to data/raw/
                  [ ] Downloaded CRC-VAL-HE-7K to data/test/
 
-Scripts:         [ ] requirements.txt written
-                 [ ] config.py written
+Scripts:         [x] requirements.txt written
+                 [x] config.py written
                  [ ] split_dataset.py written
                  [ ] train.py written
                  [ ] evaluate.py written

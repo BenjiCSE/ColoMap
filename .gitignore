@@ -1,16 +1,22 @@
-# Datasets — download from https://zenodo.org/record/1214456
-data/raw/
-data/train/
-data/val/
-data/test/
-
-# Model checkpoints — too large for GitHub
-checkpoints/
-
-# Python cache
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pth
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
 
-# Mac system files
+# ── Project data and artifacts ───────────────────────────────────────────────
+# Raw images, train/val/test splits, model checkpoints, and generated plots
+# are all large and/or reproducible — do not commit them.
+data/
+checkpoints/
+outputs/
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
 .DS_Store
+.vscode/
+.idea/
