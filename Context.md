@@ -352,7 +352,7 @@ Dataset:         [ ] Downloaded NCT-CRC-HE-100K to data/raw/
 
 Scripts:         [x] requirements.txt written
                  [x] config.py written
-                 [ ] split_dataset.py written
+                 [x] split_dataset.py written
                  [ ] train.py written
                  [ ] evaluate.py written
                  [ ] inference.py written
