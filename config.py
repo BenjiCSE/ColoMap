@@ -41,3 +41,18 @@ PIN_MEMORY  = False          # GPU only — not applicable
 # ── Learning Rate Scheduler ───────────────────────────────────────────────────
 LR_PATIENCE = 3              # reduce LR after 3 epochs of no improvement
 LR_FACTOR   = 0.5            # multiply LR by 0.5 when triggered
+
+# ── WSI Inference (Phase 2) ──────────────────────────────────────────────────
+TARGET_MPP                 = 0.5    # μm/pixel of NCT-CRC-HE training patches —
+                                    # we must extract WSI patches at this
+                                    # resolution so the model sees tissue at
+                                    # the magnification it was trained on
+WSI_BATCH_SIZE             = 64     # bigger than training batch; no gradients
+                                    # means less memory needed per sample
+TISSUE_SATURATION_THRESHOLD = 0.07  # HSV saturation cutoff (0-1). H&E stain
+                                    # is strongly saturated; glass is near 0
+TISSUE_COVERAGE_THRESHOLD  = 0.10   # min fraction of tissue pixels in a patch
+                                    # for it to be worth classifying
+HEATMAP_ALPHA              = 0.55   # opacity of colour overlay on thumbnail
+WSI_THUMBNAIL_MAX_DIM      = 2048   # longest side of the thumbnail used for
+                                    # tissue mask + final visualization

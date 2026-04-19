@@ -331,14 +331,17 @@ outputs/confusion_matrix.png     ← 9×9 normalized grid of predictions vs true
 
 ---
 
-## 13. Future Steps (Not Part of Current Work)
+## 13. Future Steps
 
-These are planned for after the training pipeline is complete. Do not implement these yet:
+Phase 2 (in progress):
 
-- WSI inference pipeline using OpenSlide to slice a whole slide image into 224×224 patches and run the model on each one
-- Tumor heatmap generation overlaid on the full WSI
+- [x] WSI inference pipeline using OpenSlide to slice a whole slide image into 224×224 patches and run the model on each one (`scripts/wsi_inference.py`)
+- [x] Tumor heatmap generation overlaid on the full WSI thumbnail (built into `wsi_inference.py`, produces `outputs/wsi_heatmap_<slide>.png`)
+
+Later phases (not yet implemented):
+
 - Gemma 4 integration as a reasoning layer on top of flagged tumor patches
-- Stain normalization preprocessing for WSI inference
+- Stain normalization preprocessing (Macenko / Vahadane) for WSI inference
 
 ---
 
@@ -364,10 +367,22 @@ Execution:       [x] split_dataset.py successfully run
                        Best val accuracy achieved: _____%
                        Epoch of best model: _____
                  [x] evaluate.py successfully run
-                       Final test accuracy: _____%
+                       Final test accuracy: 95.49%
                  [x] Training curves saved to outputs/
                  [x] Confusion matrix saved to outputs/
 
+Phase 2 — WSI inference:
+                 [x] OpenSlide installed
+                       brew openslide 4.0.0 + openslide-python 1.4.3 + openslide-bin 4.0.0.13
+                 [x] scripts/wsi_inference.py written
+                 [ ] wsi_inference.py run on a real WSI
+                       Slide tested:               _____
+                       TUM patches detected:       _____
+                       Output heatmap:             outputs/wsi_heatmap_<slide>.png
+
 Notes from last session:
-[Add any errors encountered, decisions made, or things to follow up on]
+- Training finished at 95.49% test accuracy on CRC-VAL-HE-7K (below the 97% target but in the right regime).
+- Phase 2 pipeline extracts patches at TARGET_MPP=0.5 μm/pixel to match training-dataset magnification.
+- Tissue vs. glass filtering uses HSV saturation thresholding (TISSUE_SATURATION_THRESHOLD=0.07).
+- Heatmap output has 3 panels: raw thumbnail, 9-class colour overlay with legend, TUM-only overlay.
 ```
