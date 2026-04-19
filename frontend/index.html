@@ -1,0 +1,1498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CRC Tissue Analyser</title>
+
+<!--
+  CRC Tissue Analyser — Frontend
+  ──────────────────────────────
+  Single-file web UI that talks to the Flask backend at localhost:5000.
+  No build step, no frameworks.  Chart.js (loaded from cdnjs) is the only
+  external dependency.  All CSS and JavaScript live inline in this file.
+
+  State machine:
+
+      idle  ──select SVS──►  file-selected  ──click Analyse──►  loading
+        ▲                         │                                │
+        │                         ▼                                ▼
+        └──────── Try Again / Analyse Another ◄───── results / error
+
+  Section IDs map directly to the six sections described in the spec:
+
+      #header                (always visible)
+      #upload-section        shown when mode ∈ { idle, file-selected }
+      #loading-section       shown when mode = loading
+      #results-section       shown when mode = results
+      #error-section         shown when mode = error
+      #footer                (always visible)
+
+  Only the section matching the current mode has class="active"; the
+  others have class="hidden" which sets display:none via CSS.
+-->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" defer></script>
+
+<style>
+/* ──────────────────────────────────────────────────────────────────────────
+   DESIGN TOKENS — colours, spacing, typography.
+   Using CSS custom properties so values are defined once and referenced
+   throughout.  Palette matches the spec exactly.
+   ────────────────────────────────────────────────────────────────────── */
+:root {
+  --bg-page:        #F0F2F5;
+  --bg-card:        #FFFFFF;
+  --primary-blue:   #1B3A6B;
+  --he-purple:      #6B3FA0;
+  --eosin-pink:     #D4849A;
+  --text-primary:   #111827;
+  --text-secondary: #6B7280;
+  --border:         #E5E7EB;
+  --success:        #059669;
+  --warning:        #D97706;
+  --danger:         #DC2626;
+
+  /* Subtle purple tint used for the drop-zone background. */
+  --purple-tint:        #FAF7FF;
+  --purple-tint-hover:  #F3ECFF;
+
+  /* Per-class colours used in donut chart and per-class cards. */
+  --cls-ADI:  #F4A460;
+  --cls-BACK: #D3D3D3;
+  --cls-DEB:  #8B7355;
+  --cls-LYM:  #4169E1;
+  --cls-MUC:  #98FB98;
+  --cls-MUS:  #FF8C69;
+  --cls-NORM: #52B788;
+  --cls-STR:  #C77DFF;
+  --cls-TUM:  #DC143C;
+
+  --shadow-sm: 0 1px 2px rgba(17, 24, 39, 0.04),
+               0 1px 3px rgba(17, 24, 39, 0.06);
+  --shadow-md: 0 2px 4px rgba(17, 24, 39, 0.05),
+               0 4px 12px rgba(17, 24, 39, 0.08);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   BASE
+   ────────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* Utility: fully hide a section when the state doesn't match it. */
+.hidden { display: none !important; }
+
+main {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   HEADER  (Section 1)
+   ────────────────────────────────────────────────────────────────────── */
+.app-header {
+  background: var(--primary-blue);
+  color: #fff;
+  border-bottom: 3px solid var(--he-purple);
+  padding: 20px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.app-header__title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-header__subtitle {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
+  margin-top: 2px;
+  font-weight: 400;
+}
+
+.app-header__badges {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.badge-pill {
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   CARDS — shared look & feel for every white panel on the page.
+   ────────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.card--feature { box-shadow: var(--shadow-md); }
+
+.card__title {
+  color: var(--primary-blue);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 4px 0;
+}
+
+.card__subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0 0 18px 0;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   UPLOAD  (Section 2)
+   ────────────────────────────────────────────────────────────────────── */
+.upload-wrap {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.dropzone {
+  border: 2px dashed var(--he-purple);
+  border-radius: 12px;
+  background: var(--purple-tint);
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 24px;
+  text-align: center;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dropzone:hover,
+.dropzone.is-dragover {
+  background: var(--purple-tint-hover);
+  border-color: #5a3494;
+}
+
+.dropzone.has-file {
+  background: #F4FBF6;
+  border-color: var(--success);
+}
+
+.dropzone__icon {
+  font-size: 44px;
+  color: var(--he-purple);
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.dropzone.has-file .dropzone__icon { color: var(--success); }
+
+.dropzone__hint-main {
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+
+.dropzone__hint-or {
+  color: #9CA3AF;
+  font-size: 13px;
+}
+
+.browse-btn {
+  border: 1px solid var(--he-purple);
+  color: var(--he-purple);
+  background: #fff;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  transition: background 120ms ease, color 120ms ease;
+}
+.browse-btn:hover { background: var(--he-purple); color: #fff; }
+
+.file-input-hidden {
+  position: absolute;
+  left: -9999px;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.file-ready-box {
+  margin-top: 16px;
+  border: 1px solid var(--success);
+  background: #ECFDF5;
+  color: #065F46;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+.file-ready-box__check { color: var(--success); font-weight: 700; font-size: 16px; }
+.file-ready-box__name  { font-weight: 700; color: var(--text-primary); }
+.file-ready-box__size  { color: var(--text-secondary); font-size: 13px; }
+
+.file-error-box {
+  margin-top: 16px;
+  border: 1px solid var(--danger);
+  background: #FEF2F2;
+  color: #7F1D1D;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+.file-error-box__dismiss {
+  color: var(--danger);
+  text-decoration: underline;
+  font-size: 12px;
+  background: none;
+  cursor: pointer;
+}
+
+.analyse-btn {
+  margin-top: 20px;
+  width: 100%;
+  height: 48px;
+  background: var(--primary-blue);
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  border-radius: 8px;
+  letter-spacing: 0.2px;
+  transition: background 140ms ease, transform 100ms ease;
+}
+.analyse-btn:hover:not(:disabled) { background: #152d54; }
+.analyse-btn:active:not(:disabled) { transform: translateY(1px); }
+.analyse-btn:disabled {
+  background: #9CA3AF;
+  cursor: not-allowed;
+}
+
+.analyse-hint {
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 12px;
+  margin-top: 10px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   LOADING  (Section 3)
+   ────────────────────────────────────────────────────────────────────── */
+.loading-card {
+  max-width: 560px;
+  margin: 40px auto;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.spinner {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  margin: 0 auto 20px;
+  border: 6px solid #EDE4F8;
+  border-top-color: var(--he-purple);
+  animation: spinner-rotate 1s linear infinite;
+}
+@keyframes spinner-rotate {
+  to { transform: rotate(360deg); }
+}
+
+.loading-msg {
+  color: var(--primary-blue);
+  font-size: 16px;
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+
+.loading-elapsed {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  margin: 6px 0;
+}
+
+.loading-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.progress-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: #F0E7FA;
+  overflow: hidden;
+}
+.progress-bar__fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--he-purple);
+  animation: progress-fill 180s linear forwards;
+}
+@keyframes progress-fill {
+  to { width: 100%; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   RESULTS  (Section 4)
+   ────────────────────────────────────────────────────────────────────── */
+.results-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+@media (max-width: 880px) {
+  .results-grid { grid-template-columns: 1fr; }
+}
+
+/* 4a. Heatmap card spans both columns on desktop. */
+.heatmap-card { grid-column: 1 / -1; }
+
+.heatmap-img-wrap {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.heatmap-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #F9FAFB;
+}
+
+.heatmap-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.heatmap-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.heatmap-legend__swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.heatmap-caption {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 10px;
+}
+
+/* 4b. Tumour summary — left border colour is set inline from JS. */
+.tumor-card {
+  position: relative;
+  padding-left: 28px;
+  text-align: center;
+  border-left: 4px solid var(--success);
+}
+.tumor-pct {
+  font-size: 48px;
+  font-weight: 800;
+  line-height: 1;
+  margin: 14px 0 4px;
+  letter-spacing: -1px;
+}
+.tumor-caption {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.risk-badge {
+  display: inline-block;
+  padding: 8px 20px;
+  border-radius: 999px;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-size: 14px;
+  margin: 18px 0 12px;
+}
+.risk-badge--low      { background: var(--success); }
+.risk-badge--moderate { background: var(--warning); }
+.risk-badge--high     { background: var(--danger);  }
+.tumor-subcount {
+  color: var(--text-primary);
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+.tumor-disclaimer {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: italic;
+  margin-top: 16px;
+  line-height: 1.5;
+}
+
+/* 4c. Composition (donut + table legend). */
+.composition-card {
+  grid-column: 1 / -1;
+}
+.composition-body {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 32px;
+  align-items: center;
+}
+@media (max-width: 720px) {
+  .composition-body { grid-template-columns: 1fr; }
+}
+.composition-chart {
+  width: 320px;
+  height: 320px;
+  margin: 0 auto;
+  position: relative;
+}
+.composition-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+  font-size: 13px;
+}
+.composition-legend__row {
+  display: grid;
+  grid-template-columns: 16px 48px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.composition-legend__sw {
+  width: 12px; height: 12px; border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.composition-legend__abbr {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.composition-legend__full {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composition-legend__pct {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* 4d. Per-class grid. */
+.class-grid-card { grid-column: 1 / -1; }
+.class-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 880px) {
+  .class-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .class-grid { grid-template-columns: 1fr; }
+}
+.class-tile {
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+  border-left: 4px solid #ccc;
+}
+.class-tile--tum { background: #FFF5F5; }
+.class-tile__abbr {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  line-height: 1.1;
+}
+.class-tile__full {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+  margin-bottom: 10px;
+}
+.class-tile__count {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+.class-tile__pct {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* 4e. Metadata strip. */
+.meta-strip {
+  background: #F3F4F6;
+  border-radius: 8px;
+  padding: 12px 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 20px;
+}
+.meta-pill {
+  font-size: 12px;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+/* 4f. Action buttons row. */
+.action-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+.btn {
+  flex: 1;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 14px;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.btn--primary {
+  background: var(--primary-blue);
+  color: #fff;
+}
+.btn--primary:hover { background: #152d54; }
+.btn--outline {
+  background: #fff;
+  color: var(--primary-blue);
+  border: 1.5px solid var(--primary-blue);
+}
+.btn--outline:hover { background: #EEF2FB; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   ERROR  (Section 5)
+   ────────────────────────────────────────────────────────────────────── */
+.error-card {
+  max-width: 560px;
+  margin: 40px auto;
+  border-left: 4px solid var(--danger);
+  text-align: center;
+}
+.error-card__icon {
+  font-size: 42px;
+  color: var(--danger);
+  line-height: 1;
+}
+.error-card__title {
+  color: var(--danger);
+  font-size: 20px;
+  font-weight: 700;
+  margin: 10px 0 6px;
+}
+.error-card__msg {
+  color: var(--text-primary);
+  font-size: 14px;
+  margin-bottom: 18px;
+  word-break: break-word;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   FOOTER  (Section 6)
+   ────────────────────────────────────────────────────────────────────── */
+.app-footer {
+  background: var(--bg-page);
+  border-top: 1px solid var(--border);
+  padding: 24px 32px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.app-footer__ro {
+  color: var(--danger);
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  margin-bottom: 8px;
+}
+.app-footer__disclaimer { max-width: 720px; margin: 0 auto 8px; }
+.app-footer__build { color: #9CA3AF; font-size: 11px; }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   TOAST (copy-to-clipboard feedback)
+   ────────────────────────────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--primary-blue);
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+}
+.toast.is-visible { opacity: 1; }
+</style>
+</head>
+
+<body>
+
+<!-- ──────────────────────────────────────────────────────────────────────
+     SECTION 1 — HEADER
+     ────────────────────────────────────────────────────────────────── -->
+<header class="app-header" id="header">
+  <div>
+    <div class="app-header__title">
+      <span aria-hidden="true">🔬</span>
+      <span>CRC Tissue Analyser</span>
+    </div>
+    <div class="app-header__subtitle">
+      Colorectal Cancer Tissue Classification &middot; ResNet-50
+    </div>
+  </div>
+  <div class="app-header__badges">
+    <span class="badge-pill">Test Accuracy: 95.49%</span>
+    <span class="badge-pill">Val Accuracy: 98.22%</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       SECTION 2 — UPLOAD  (idle + file-selected states)
+       ───────────────────────────────────────────────────────────── -->
+  <section id="upload-section">
+    <div class="upload-wrap">
+      <div class="card">
+        <h2 class="card__title">Upload Whole Slide Image</h2>
+        <p class="card__subtitle">Supported format: Aperio SVS (.svs)</p>
+
+        <!-- The whole drop zone is clickable and also accepts drag-drop. -->
+        <div class="dropzone" id="dropzone" role="button" tabindex="0"
+             aria-label="Upload SVS file">
+          <div class="dropzone__icon" aria-hidden="true">&#x2B06;</div>
+          <div class="dropzone__hint-main">Drop your SVS file here</div>
+          <div class="dropzone__hint-or">or</div>
+          <button type="button" class="browse-btn" id="browse-btn">
+            Browse Files
+          </button>
+        </div>
+
+        <!-- Hidden real file input; we forward clicks from the drop zone. -->
+        <input type="file" id="file-input" class="file-input-hidden"
+               accept=".svs" />
+
+        <!-- Shown only after a valid SVS file has been selected. -->
+        <div id="file-ready" class="file-ready-box hidden">
+          <span class="file-ready-box__check" aria-hidden="true">&#x2713;</span>
+          <div>
+            <div class="file-ready-box__name" id="file-ready-name"></div>
+            <div class="file-ready-box__size" id="file-ready-size"></div>
+          </div>
+        </div>
+
+        <!-- Shown only when the user picks a non-SVS file. -->
+        <div id="file-error" class="file-error-box hidden">
+          <span>Invalid file type. Please select an SVS file (.svs).</span>
+          <button type="button" class="file-error-box__dismiss"
+                  id="file-error-dismiss">Dismiss</button>
+        </div>
+
+        <button type="button" class="analyse-btn" id="analyse-btn" disabled>
+          Analyse Slide
+        </button>
+        <div class="analyse-hint">
+          Processing typically takes 1&ndash;3 minutes on CPU
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       SECTION 3 — LOADING  (shown during /analyze call)
+       ───────────────────────────────────────────────────────────── -->
+  <section id="loading-section" class="hidden">
+    <div class="card loading-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="loading-msg" id="loading-msg">Opening slide file...</div>
+      <div class="loading-elapsed" id="loading-elapsed">Elapsed: 0:00</div>
+      <div class="loading-hint">Large slides may take up to 3 minutes on CPU</div>
+      <div class="progress-bar"><span class="progress-bar__fill"></span></div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       SECTION 4 — RESULTS  (populated by JS after /analyze returns)
+       ───────────────────────────────────────────────────────────── -->
+  <section id="results-section" class="hidden">
+
+    <!-- 4e. Metadata strip. -->
+    <div class="meta-strip" id="meta-strip"></div>
+
+    <div class="results-grid">
+
+      <!-- 4a. Heatmap card. -->
+      <div class="card card--feature heatmap-card">
+        <h2 class="card__title">Tissue Heatmap</h2>
+        <div class="heatmap-img-wrap">
+          <img id="heatmap-img" class="heatmap-img" alt="Tissue heatmap" />
+        </div>
+        <div class="heatmap-legend" id="heatmap-legend"></div>
+        <div class="heatmap-caption">
+          Each coloured region represents the predicted tissue type for that
+          patch of the slide.
+        </div>
+      </div>
+
+      <!-- 4b. Tumour detection summary. -->
+      <div class="card card--feature tumor-card" id="tumor-card">
+        <h2 class="card__title">Tumor Detection Summary</h2>
+        <div class="tumor-pct" id="tumor-pct">&mdash;</div>
+        <div class="tumor-caption">
+          of classified patches identified as tumor epithelium
+        </div>
+        <div class="risk-badge" id="risk-badge">&mdash;</div>
+        <div class="tumor-subcount" id="tumor-subcount">&mdash;</div>
+        <div class="tumor-disclaimer">
+          Risk level is based solely on the proportion of tumor epithelium
+          patches detected and should not be used for clinical diagnosis.
+        </div>
+      </div>
+
+      <!-- 4c. Donut composition chart. -->
+      <div class="card composition-card">
+        <h2 class="card__title">Tissue Composition</h2>
+        <div class="composition-body">
+          <div class="composition-chart">
+            <canvas id="donut-chart"></canvas>
+          </div>
+          <div class="composition-legend" id="composition-legend"></div>
+        </div>
+      </div>
+
+      <!-- 4d. Per-class tile grid. -->
+      <div class="card class-grid-card">
+        <h2 class="card__title">Per-class Breakdown</h2>
+        <div class="class-grid" id="class-grid"></div>
+      </div>
+    </div>
+
+    <!-- 4f. Action buttons. -->
+    <div class="action-row">
+      <button type="button" class="btn btn--outline" id="export-btn">
+        Export Report
+      </button>
+      <button type="button" class="btn btn--primary" id="reset-btn">
+        Analyse Another Slide
+      </button>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────────────────
+       SECTION 5 — ERROR
+       ───────────────────────────────────────────────────────────── -->
+  <section id="error-section" class="hidden">
+    <div class="card error-card">
+      <div class="error-card__icon" aria-hidden="true">&#9888;</div>
+      <div class="error-card__title">Analysis Failed</div>
+      <div class="error-card__msg" id="error-msg"></div>
+      <button type="button" class="btn btn--primary" id="error-retry-btn">
+        Try Again
+      </button>
+    </div>
+  </section>
+
+</main>
+
+<!-- ──────────────────────────────────────────────────────────────────────
+     SECTION 6 — FOOTER
+     ────────────────────────────────────────────────────────────────── -->
+<footer class="app-footer">
+  <div class="app-footer__ro">RESEARCH USE ONLY</div>
+  <div class="app-footer__disclaimer">
+    CRC Tissue Analyser is intended for research and educational purposes
+    only.  It is not a certified medical device and has not been approved
+    for clinical diagnosis, treatment planning, or patient care.  All
+    results must be verified by a qualified pathologist.
+  </div>
+  <div class="app-footer__build">
+    Model trained on NCT-CRC-HE-100K &middot; ResNet-50 &middot; PyTorch
+  </div>
+</footer>
+
+<!-- Toast element for transient messages (e.g. "Report copied"). -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ───────────────────────────────────────────────────────────────────────
+   CLIENT-SIDE LOGIC for CRC Tissue Analyser frontend.
+
+   Everything lives inside an IIFE so nothing leaks into the global scope
+   except for the single `state` object referenced via closures below.
+   ─────────────────────────────────────────────────────────────────── */
+(() => {
+  "use strict";
+
+  // ─── Constants shared with the backend and the spec ────────────────────
+  // Port 5001 (not 5000) because macOS AirPlay Receiver claims 5000.
+  const API_URL = "http://localhost:5001";
+
+  // Class order MUST match config.CLASSES on the server (alphabetical).
+  const CLASS_ORDER = ["ADI", "BACK", "DEB", "LYM", "MUC", "MUS",
+                       "NORM", "STR", "TUM"];
+
+  // Full name + chart colour per class, matching the spec exactly.
+  const CLASS_META = {
+    ADI:  { full: "Adipose (fat tissue)",            color: "#F4A460" },
+    BACK: { full: "Background (empty slide)",        color: "#D3D3D3" },
+    DEB:  { full: "Debris (necrotic material)",      color: "#8B7355" },
+    LYM:  { full: "Lymphocytes (immune cells)",      color: "#4169E1" },
+    MUC:  { full: "Mucus",                           color: "#98FB98" },
+    MUS:  { full: "Muscularis (smooth muscle)",      color: "#FF8C69" },
+    NORM: { full: "Normal mucosa (healthy tissue)",  color: "#52B788" },
+    STR:  { full: "Stroma (connective tissue)",      color: "#C77DFF" },
+    TUM:  { full: "Tumor epithelium",                color: "#DC143C" },
+  };
+
+  // Loading messages that cycle every 4 seconds during /analyze.
+  const LOADING_MESSAGES = [
+    "Opening slide file...",
+    "Building tissue mask...",
+    "Extracting 224\u00D7224 patches...",
+    "Classifying tissue types...",
+    "Running ResNet-50 inference...",
+    "Generating heatmap...",
+    "Finalising results...",
+  ];
+
+  // ─── The single source of truth for UI state ───────────────────────────
+  // mode:     'idle' | 'file-selected' | 'loading' | 'results' | 'error'
+  // file:     File object currently selected, or null
+  // results:  response JSON from /analyze, or null
+  // errorMsg: human-readable error string to show, or null
+  // timers:   interval handles so we can clear them cleanly on state change
+  // chart:    Chart.js instance (rebuilt each new result)
+  const state = {
+    mode: "idle",
+    file: null,
+    results: null,
+    errorMsg: null,
+    loadingMsgIdx: 0,
+    elapsedSeconds: 0,
+    timers: { msg: null, elapsed: null, request: 0 },
+    chart: null,
+  };
+
+  /* ─── Utilities ──────────────────────────────────────────────────────── */
+
+  /** Convert a byte count into a human-readable string like "353.2 MB". */
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, n = bytes;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+    const decimals = (i === 0 || n >= 100) ? 0 : 1;
+    return `${n.toFixed(decimals)} ${units[i]}`;
+  }
+
+  /** Format seconds as "M:SS" for the elapsed-time display. */
+  function formatElapsed(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  }
+
+  /** Show a transient bottom-of-screen toast message for `ms` milliseconds. */
+  function showToast(message, ms = 2000) {
+    const el = document.getElementById("toast");
+    el.textContent = message;
+    el.classList.add("is-visible");
+    setTimeout(() => el.classList.remove("is-visible"), ms);
+  }
+
+  /** Escape a string for safe insertion into HTML content. */
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  /* ─── Section visibility driven by state.mode ────────────────────────── */
+
+  /**
+   * Show only the section(s) appropriate for the current state.mode and
+   * hide the rest.  Centralised so no individual handler has to remember
+   * which sections to toggle.
+   */
+  function applyMode() {
+    const showUpload  = state.mode === "idle" || state.mode === "file-selected";
+    const showLoading = state.mode === "loading";
+    const showResults = state.mode === "results";
+    const showError   = state.mode === "error";
+
+    document.getElementById("upload-section")
+      .classList.toggle("hidden", !showUpload);
+    document.getElementById("loading-section")
+      .classList.toggle("hidden", !showLoading);
+    document.getElementById("results-section")
+      .classList.toggle("hidden", !showResults);
+    document.getElementById("error-section")
+      .classList.toggle("hidden", !showError);
+
+    // Enable/disable the Analyse button depending on whether a valid file
+    // has been selected.
+    document.getElementById("analyse-btn").disabled =
+      state.mode !== "file-selected";
+  }
+
+  /* ─── Upload section behaviour ───────────────────────────────────────── */
+
+  /**
+   * Handle a file chosen via either the hidden <input> or a drag-and-drop.
+   * Performs extension validation, updates state, and refreshes the UI.
+   */
+  function handleFileChosen(file) {
+    if (!file) return;
+
+    const nameLower = file.name.toLowerCase();
+    if (!nameLower.endsWith(".svs")) {
+      // Wrong file type — keep mode=idle but show the red error box.
+      state.file = null;
+      state.mode = "idle";
+      document.getElementById("file-error").classList.remove("hidden");
+      document.getElementById("file-ready").classList.add("hidden");
+      document.getElementById("dropzone").classList.remove("has-file");
+      applyMode();
+      return;
+    }
+
+    // Valid SVS: update state, hide error box, show the green "ready" box.
+    state.file = file;
+    state.mode = "file-selected";
+    document.getElementById("file-error").classList.add("hidden");
+
+    const readyBox = document.getElementById("file-ready");
+    document.getElementById("file-ready-name").textContent = file.name;
+    document.getElementById("file-ready-size").textContent =
+      formatBytes(file.size);
+    readyBox.classList.remove("hidden");
+
+    document.getElementById("dropzone").classList.add("has-file");
+    applyMode();
+  }
+
+  /** Wire all of the upload-section event listeners (called once at init). */
+  function initUploadSection() {
+    const dropzone    = document.getElementById("dropzone");
+    const fileInput   = document.getElementById("file-input");
+    const browseBtn   = document.getElementById("browse-btn");
+    const dismissBtn  = document.getElementById("file-error-dismiss");
+    const analyseBtn  = document.getElementById("analyse-btn");
+
+    // Click / keyboard on the drop zone → open file picker.
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+    browseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();  // don't double-trigger via the drop zone
+      fileInput.click();
+    });
+
+    // Real file input → state update.
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files.length) {
+        handleFileChosen(e.target.files[0]);
+      }
+    });
+
+    // Drag-and-drop handlers.
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.add("is-dragover");
+    });
+    dropzone.addEventListener("dragleave", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.remove("is-dragover");
+    });
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropzone.classList.remove("is-dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        handleFileChosen(e.dataTransfer.files[0]);
+      }
+    });
+
+    // Dismiss the wrong-file-type error box.
+    dismissBtn.addEventListener("click", () => {
+      document.getElementById("file-error").classList.add("hidden");
+    });
+
+    // Trigger analysis.
+    analyseBtn.addEventListener("click", () => {
+      if (state.mode === "file-selected") startAnalysis();
+    });
+  }
+
+  /* ─── Loading section behaviour ─────────────────────────────────────── */
+
+  /**
+   * Enter the loading state: start the cycling status message and elapsed
+   * timer, stash their interval handles on state.timers so we can clear
+   * them later in stopLoadingTimers().
+   */
+  function startLoadingTimers() {
+    state.loadingMsgIdx = 0;
+    state.elapsedSeconds = 0;
+    state.timers.request = Date.now();
+
+    document.getElementById("loading-msg").textContent = LOADING_MESSAGES[0];
+    document.getElementById("loading-elapsed").textContent = "Elapsed: 0:00";
+
+    // Cycle status message every 4 seconds.
+    state.timers.msg = setInterval(() => {
+      state.loadingMsgIdx =
+        (state.loadingMsgIdx + 1) % LOADING_MESSAGES.length;
+      document.getElementById("loading-msg").textContent =
+        LOADING_MESSAGES[state.loadingMsgIdx];
+    }, 4000);
+
+    // Update elapsed counter every second.
+    state.timers.elapsed = setInterval(() => {
+      state.elapsedSeconds += 1;
+      document.getElementById("loading-elapsed").textContent =
+        `Elapsed: ${formatElapsed(state.elapsedSeconds)}`;
+    }, 1000);
+  }
+
+  /** Stop both loading intervals (safe to call multiple times). */
+  function stopLoadingTimers() {
+    if (state.timers.msg)     { clearInterval(state.timers.msg);     state.timers.msg = null; }
+    if (state.timers.elapsed) { clearInterval(state.timers.elapsed); state.timers.elapsed = null; }
+  }
+
+  /* ─── Analysis — the main Fetch call ────────────────────────────────── */
+
+  /**
+   * Send the selected file to POST /analyze and transition to either the
+   * results state (on 200) or the error state (on anything else, including
+   * network failure).
+   */
+  async function startAnalysis() {
+    if (!state.file) return;
+
+    state.mode = "loading";
+    state.errorMsg = null;
+    applyMode();
+    startLoadingTimers();
+
+    try {
+      const form = new FormData();
+      form.append("file", state.file);
+
+      const resp = await fetch(`${API_URL}/analyze`, {
+        method: "POST",
+        body: form,
+      });
+
+      // The server always returns JSON — either the success payload or an
+      // { error: ... } object.  Parse before branching on status.
+      let payload;
+      try {
+        payload = await resp.json();
+      } catch (_) {
+        throw new Error(
+          "Server returned an unreadable response. Is app.py running?"
+        );
+      }
+
+      if (!resp.ok) {
+        throw new Error(payload.error || `Server error (HTTP ${resp.status}).`);
+      }
+
+      state.results = payload;
+      state.mode = "results";
+      stopLoadingTimers();
+      renderResults(payload);
+      applyMode();
+    } catch (err) {
+      stopLoadingTimers();
+      // Distinguish "server not running" from explicit server errors.
+      if (err instanceof TypeError) {
+        state.errorMsg =
+          "Could not connect to the analysis server. Make sure app.py is "
+          + "running on localhost:5001 before uploading a slide.";
+      } else {
+        state.errorMsg = err.message || String(err);
+      }
+      state.mode = "error";
+      document.getElementById("error-msg").textContent = state.errorMsg;
+      applyMode();
+    }
+  }
+
+  /* ─── Results rendering ──────────────────────────────────────────────── */
+
+  /**
+   * Populate every part of the results section from the /analyze response
+   * payload.  Broken into small helpers so each section's logic is clear.
+   */
+  function renderResults(r) {
+    renderMetaStrip(r);
+    renderHeatmap(r);
+    renderTumorSummary(r);
+    renderComposition(r);
+    renderClassGrid(r);
+  }
+
+  /** 4e. Metadata strip of pill-shaped info chips. */
+  function renderMetaStrip(r) {
+    const pills = [
+      ["\uD83D\uDCD0", "Dimensions",       r.slide_dimensions],
+      ["\uD83D\uDD2C", "Tissue coverage",  `${r.tissue_coverage}%`],
+      ["\uD83E\uDDE9", "Patches",          r.total_patches.toLocaleString()],
+      ["\u23F1",       "Processing",       `${r.processing_time_minutes} min`],
+      ["\uD83D\uDCCA", "Val accuracy",     `${r.val_accuracy}%`],
+      ["\uD83C\uDFC6", "Best epoch",       r.best_epoch],
+    ];
+    document.getElementById("meta-strip").innerHTML =
+      pills.map(([icon, label, value]) =>
+        `<span class="meta-pill"><span>${icon}</span>
+         <strong>${escHtml(label)}:</strong> ${escHtml(value)}</span>`
+      ).join("");
+  }
+
+  /** 4a. Heatmap image + inline legend row. */
+  function renderHeatmap(r) {
+    const img = document.getElementById("heatmap-img");
+    // Cache-bust so re-analysing the same slide doesn't show a stale image.
+    img.src = `${API_URL}${r.heatmap_url}?t=${Date.now()}`;
+
+    document.getElementById("heatmap-legend").innerHTML =
+      CLASS_ORDER.map((cls) => `
+        <span class="heatmap-legend__item">
+          <span class="heatmap-legend__swatch"
+                style="background:${CLASS_META[cls].color}"></span>
+          <strong>${cls}</strong>
+          <span style="color:var(--text-secondary)">${escHtml(CLASS_META[cls].full)}</span>
+        </span>`).join("");
+  }
+
+  /** 4b. Tumour detection summary + risk badge. */
+  function renderTumorSummary(r) {
+    const tumCount = r.patch_counts.TUM || 0;
+    const total    = r.total_patches || 0;
+    const pct      = total > 0 ? (tumCount / total) * 100 : 0;
+
+    let riskText, riskClass, colour;
+    if (pct < 5)       { riskText = "LOW RISK";      riskClass = "risk-badge--low";      colour = "var(--success)"; }
+    else if (pct < 15) { riskText = "MODERATE RISK"; riskClass = "risk-badge--moderate"; colour = "var(--warning)"; }
+    else               { riskText = "HIGH RISK";     riskClass = "risk-badge--high";     colour = "var(--danger)";  }
+
+    const card = document.getElementById("tumor-card");
+    card.style.borderLeftColor = colour;
+
+    const pctEl = document.getElementById("tumor-pct");
+    pctEl.textContent = `${pct.toFixed(1)}%`;
+    pctEl.style.color = colour;
+
+    const badge = document.getElementById("risk-badge");
+    badge.textContent = riskText;
+    badge.className = `risk-badge ${riskClass}`;
+
+    document.getElementById("tumor-subcount").innerHTML =
+      `<strong>${tumCount.toLocaleString()}</strong> patches &middot; `
+      + `${pct.toFixed(2)}% of total`;
+  }
+
+  /** 4c. Build the donut chart + its side legend. */
+  function renderComposition(r) {
+    const labels = CLASS_ORDER;
+    const counts = CLASS_ORDER.map((cls) => r.patch_counts[cls] || 0);
+    const colors = CLASS_ORDER.map((cls) => CLASS_META[cls].color);
+    const total  = counts.reduce((a, b) => a + b, 0) || 1;
+
+    // Destroy any previous chart instance before creating a new one.
+    if (state.chart) { state.chart.destroy(); state.chart = null; }
+
+    const ctx = document.getElementById("donut-chart").getContext("2d");
+    state.chart = new Chart(ctx, {
+      type: "doughnut",
+      data: {
+        labels,
+        datasets: [{
+          data: counts,
+          backgroundColor: colors,
+          borderWidth: 2,
+          borderColor: "#ffffff",
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: "62%",
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const n   = ctx.parsed;
+                const pct = (n / total) * 100;
+                return ` ${ctx.label}: ${n.toLocaleString()} (${pct.toFixed(1)}%)`;
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Two-column legend to the right of the chart.
+    document.getElementById("composition-legend").innerHTML =
+      CLASS_ORDER.map((cls) => {
+        const n   = r.patch_counts[cls] || 0;
+        const pct = ((n / total) * 100).toFixed(1);
+        return `
+          <div class="composition-legend__row">
+            <span class="composition-legend__sw"
+                  style="background:${CLASS_META[cls].color}"></span>
+            <span class="composition-legend__abbr">${cls}</span>
+            <span class="composition-legend__full">${escHtml(CLASS_META[cls].full)}</span>
+            <span class="composition-legend__pct">${pct}%</span>
+          </div>`;
+      }).join("");
+  }
+
+  /** 4d. Grid of per-class tiles, sorted by patch count descending. */
+  function renderClassGrid(r) {
+    const total = r.total_patches || 1;
+    const sorted = [...CLASS_ORDER].sort(
+      (a, b) => (r.patch_counts[b] || 0) - (r.patch_counts[a] || 0)
+    );
+    document.getElementById("class-grid").innerHTML = sorted.map((cls) => {
+      const meta = CLASS_META[cls];
+      const n    = r.patch_counts[cls] || 0;
+      const pct  = ((n / total) * 100).toFixed(2);
+      const cls2 = cls === "TUM" ? " class-tile--tum" : "";
+      return `
+        <div class="class-tile${cls2}" style="border-left-color:${meta.color}">
+          <div class="class-tile__abbr" style="color:${meta.color}">${cls}</div>
+          <div class="class-tile__full">${escHtml(meta.full)}</div>
+          <div class="class-tile__count">${n.toLocaleString()}</div>
+          <div class="class-tile__pct">${pct}%</div>
+        </div>`;
+    }).join("");
+  }
+
+  /* ─── Export-report button ───────────────────────────────────────────── */
+
+  /**
+   * Build a plain-text report from the current results and copy it to the
+   * clipboard.  Falls back to a textarea-select trick if the Clipboard
+   * API is unavailable (e.g. when opened via file://).
+   */
+  async function exportReport() {
+    if (!state.results) return;
+    const r = state.results;
+    const now = new Date();
+    const fileName = state.file ? state.file.name : "(unknown)";
+    const tum = r.patch_counts.TUM || 0;
+    const tumPct = (tum / (r.total_patches || 1)) * 100;
+
+    let riskLabel = "LOW";
+    if (tumPct >= 15)      riskLabel = "HIGH";
+    else if (tumPct >= 5)  riskLabel = "MODERATE";
+
+    const lines = [];
+    lines.push("CRC TISSUE ANALYSER \u2014 ANALYSIS REPORT");
+    lines.push("======================================");
+    lines.push(`Date: ${now.toLocaleString()}`);
+    lines.push(`Slide: ${fileName}`);
+    lines.push("");
+    lines.push("TISSUE CLASSIFICATION RESULTS");
+    lines.push("------------------------------");
+    for (const cls of CLASS_ORDER) {
+      const n   = r.patch_counts[cls] || 0;
+      const pct = ((n / (r.total_patches || 1)) * 100).toFixed(2);
+      lines.push(`${cls}: ${n} patches (${pct}%)`);
+    }
+    lines.push("");
+    lines.push("TUMOR DETECTION");
+    lines.push("---------------");
+    lines.push(`TUM patches: ${tum} (${tumPct.toFixed(2)}%)`);
+    lines.push(`Risk Level: ${riskLabel}`);
+    lines.push("");
+    lines.push("SLIDE INFORMATION");
+    lines.push("-----------------");
+    lines.push(`Dimensions: ${r.slide_dimensions}`);
+    lines.push(`Tissue coverage: ${r.tissue_coverage}%`);
+    lines.push(`Total patches classified: ${r.total_patches}`);
+    lines.push(`Processing time: ${r.processing_time_minutes} minutes`);
+    lines.push("");
+    lines.push("MODEL INFORMATION");
+    lines.push("-----------------");
+    lines.push("Architecture: ResNet-50");
+    lines.push(`Val accuracy: ${r.val_accuracy}%`);
+    lines.push("Test accuracy: 95.49%");
+    lines.push(`Best epoch: ${r.best_epoch}`);
+    lines.push("Training images: 3,600 (400 per class)");
+    lines.push("");
+    lines.push("DISCLAIMER");
+    lines.push("----------");
+    lines.push("This analysis is for research purposes only.");
+    lines.push("Not approved for clinical diagnosis or patient care.");
+    lines.push("Consult a qualified pathologist for diagnostic interpretation.");
+
+    const text = lines.join("\n");
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // file:// pages aren't "secure contexts" in Chrome; fall back.
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      showToast("Report copied to clipboard");
+    } catch (_) {
+      // Absolute last resort: open a new window with the text selected so
+      // the user can still grab it manually.
+      const w = window.open("", "_blank");
+      if (w) {
+        w.document.body.style.whiteSpace = "pre-wrap";
+        w.document.body.style.fontFamily = "monospace";
+        w.document.body.textContent = text;
+      }
+      showToast("Report opened in new tab (clipboard unavailable)");
+    }
+  }
+
+  /* ─── Full UI reset ──────────────────────────────────────────────────── */
+
+  /**
+   * Return the UI to its initial idle state: no file selected, no error,
+   * no results rendered, Analyse button disabled, drop zone cleared.
+   */
+  function resetUI() {
+    stopLoadingTimers();
+    state.file = null;
+    state.results = null;
+    state.errorMsg = null;
+    state.mode = "idle";
+
+    document.getElementById("file-input").value = "";
+    document.getElementById("file-ready").classList.add("hidden");
+    document.getElementById("file-error").classList.add("hidden");
+    document.getElementById("dropzone").classList.remove("has-file");
+
+    if (state.chart) { state.chart.destroy(); state.chart = null; }
+
+    applyMode();
+  }
+
+  /* ─── Wire up remaining listeners + initial render ───────────────────── */
+
+  function init() {
+    initUploadSection();
+
+    document.getElementById("export-btn")
+      .addEventListener("click", exportReport);
+    document.getElementById("reset-btn")
+      .addEventListener("click", resetUI);
+    document.getElementById("error-retry-btn")
+      .addEventListener("click", resetUI);
+
+    applyMode();
+  }
+
+  // Wait for DOM (and Chart.js, loaded with defer) to be ready.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+
+</body>
+</html>

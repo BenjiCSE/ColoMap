@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend — required when running from Flask
 """
 wsi_inference.py
 ────────────────

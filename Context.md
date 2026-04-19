@@ -380,6 +380,14 @@ Phase 2 — WSI inference:
                        TUM patches detected:       _____
                        Output heatmap:             outputs/wsi_heatmap_<slide>.png
 
+Phase 3 — Web app:
+                 [x] Flask + Flask-Cors installed (Flask 3.0.3, Flask-Cors 4.0.1)
+                 [x] scripts/app.py written (imports wsi_inference helpers directly)
+                 [x] frontend/index.html written (single file, inline CSS/JS, Chart.js via CDN)
+                 [ ] end-to-end test: upload SVS, see heatmap + dashboard
+                       Slide tested:               _____
+                       Round-trip time:            _____
+
 Notes from last session:
 - Training finished at 95.49% test accuracy on CRC-VAL-HE-7K (below the 97% target but in the right regime).
 - Phase 2 pipeline extracts patches at TARGET_MPP=0.5 μm/pixel to match training-dataset magnification.
