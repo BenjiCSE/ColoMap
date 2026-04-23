@@ -41,6 +41,50 @@ import config
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
+def _class_subdir_names(path: str) -> list[str]:
+    """Immediate child directory names, sorted (ImageFolder order)."""
+    if not os.path.isdir(path):
+        return []
+    names = [
+        d
+        for d in os.listdir(path)
+        if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")
+    ]
+    return sorted(names)
+
+
+def resolve_test_data_root() -> str:
+    """Return the directory that directly contains the 9 class folders.
+
+    Supports the README layout (``data/test/ADI/``, ``...``) and the common
+    unzip case where the archive adds one wrapper, e.g.
+    ``data/test/CRC-VAL-HE-7K/ADI/``, ``...``.
+    """
+    base = os.path.join(PROJECT_ROOT, config.TEST_DIR)
+    if not os.path.isdir(base):
+        raise FileNotFoundError(
+            f"Test directory not found: {base}\n"
+            f"Unzip CRC-VAL-HE-7K so the 9 class folders are under {config.TEST_DIR}/ "
+            f"or {config.TEST_DIR}/<any_wrapper>/."
+        )
+
+    if _class_subdir_names(base) == config.CLASSES:
+        return base
+
+    for name in _class_subdir_names(base):
+        nested = os.path.join(base, name)
+        if _class_subdir_names(nested) == config.CLASSES:
+            return nested
+
+    raise RuntimeError(
+        f"Could not find the 9 tissue class folders under {base}.\n"
+        f"  config.CLASSES: {config.CLASSES}\n"
+        f"  Top-level subdirs: {_class_subdir_names(base)!r}\n"
+        f"Either move the 9 class folders up into {config.TEST_DIR}/, or place them "
+        f"in a single subfolder of {config.TEST_DIR}/ (e.g. CRC-VAL-HE-7K/)."
+    )
+
+
 def build_test_loader() -> tuple[DataLoader, list[str]]:
     """Build the test DataLoader.
 
@@ -54,15 +98,18 @@ def build_test_loader() -> tuple[DataLoader, list[str]]:
         transforms.Normalize(mean=config.IMAGENET_MEAN, std=config.IMAGENET_STD),
     ])
 
-    test_ds = ImageFolder(config.TEST_DIR, transform=test_tf)
+    test_root = resolve_test_data_root()
+    test_ds = ImageFolder(test_root, transform=test_tf)
 
     if test_ds.classes != config.CLASSES:
         raise RuntimeError(
-            f"Class order mismatch in {config.TEST_DIR}!\n"
+            f"Class order mismatch in {test_root}!\n"
             f"  ImageFolder:    {test_ds.classes}\n"
             f"  config.CLASSES: {config.CLASSES}\n"
             f"Fix folder names or config.CLASSES so they match."
         )
+
+    print(f"Test data root: {os.path.abspath(test_root)}")
 
     test_loader = DataLoader(
         test_ds,
