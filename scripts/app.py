@@ -236,8 +236,15 @@ def run_wsi_analysis(slide_path: str) -> dict[str, Any]:
     processing_minutes = (time.time() - t_start) / 60.0
 
     # 6. Assemble the response dict that matches the frontend contract.
+    #    `heatmap_url` stays for backward compatibility (the legacy 3-panel
+    #    composite). `thumbnail_url` and `overlay_url` are the two
+    #    pixel-aligned layers the OpenSeadragon viewer stacks: a base RGB
+    #    thumbnail and a transparent RGBA overlay that can be toggled
+    #    on/off without resetting the viewer's zoom/pan.
     return {
         "heatmap_url":              f"/outputs/{heatmap_filename}",
+        "thumbnail_url":            f"/outputs/wsi_thumb_{slide_name}.png",
+        "overlay_url":              f"/outputs/wsi_overlay_{slide_name}.png",
         "patch_counts":             patch_counts,
         "total_patches":            total_classified,
         "tissue_coverage":          round(tissue_coverage_pct, 2),

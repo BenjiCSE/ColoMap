@@ -258,6 +258,17 @@ def render_overlay(
     )
     overlay = np.asarray(rgba_img).astype(np.float32) / 255.0
 
+    # ── NEW: save the raw thumbnail and the transparent overlay as separate
+    # PNGs alongside the existing 3-panel composite.  These are what the
+    # OpenSeadragon viewer in the frontend loads as two pixel-aligned layers
+    # so the user can toggle the heatmap on/off without resetting the viewport.
+    out_dir = os.path.dirname(output_path)
+    os.makedirs(out_dir, exist_ok=True)
+    thumb_only_path   = os.path.join(out_dir, f"wsi_thumb_{slide_name}.png")
+    overlay_only_path = os.path.join(out_dir, f"wsi_overlay_{slide_name}.png")
+    thumb.save(thumb_only_path, format="PNG")
+    rgba_img.save(overlay_only_path, format="PNG")
+
     # Alpha composite: out = thumb * (1-alpha) + overlay_rgb * alpha.
     alpha = overlay[..., 3:4]
     blended = thumb_np * (1 - alpha) + overlay[..., :3] * alpha

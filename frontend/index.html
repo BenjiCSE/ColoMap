@@ -33,6 +33,15 @@
 -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js" defer></script>
+<!--
+  OpenSeadragon — deep-zoom viewer used by the heatmap card.
+  Pinned to a stable 4.x release; cdnjs hosts the matching `images/` folder
+  used as `prefixUrl` for the built-in zoom / home / fullpage button icons.
+  Loaded synchronously (no `defer`) so the global `OpenSeadragon` constructor
+  is available the first time `WsiViewer.init()` runs after a successful
+  /analyze response.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.0/openseadragon.min.js"></script>
 
 <style>
 /* ──────────────────────────────────────────────────────────────────────────
@@ -416,6 +425,80 @@ main {
   background: #F9FAFB;
 }
 
+/* ── OpenSeadragon viewer ──────────────────────────────────────────────────
+   The viewer container needs an explicit size — OpenSeadragon measures the
+   element on init. We use a responsive height so it works on both desktop
+   and laptop screens.
+   ─────────────────────────────────────────────────────────────────────── */
+.heatmap-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.heatmap-card__head .card__title { margin: 0; }
+
+.heatmap-viewer {
+  position: relative;
+  width: 100%;
+  height: 60vh;
+  min-height: 420px;
+  max-height: 720px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--border);
+  background:
+    linear-gradient(45deg, #F4F5F7 25%, transparent 25%) 0 0 / 16px 16px,
+    linear-gradient(-45deg, #F4F5F7 25%, transparent 25%) 0 8px / 16px 16px,
+    linear-gradient(45deg, transparent 75%, #F4F5F7 75%) 8px -8px / 16px 16px,
+    linear-gradient(-45deg, transparent 75%, #F4F5F7 75%) -8px 0 / 16px 16px,
+    #FFFFFF;
+}
+
+/* Built-in OpenSeadragon nav buttons — make them readable on the white BG. */
+.heatmap-viewer .openseadragon-container { background: transparent !important; }
+
+/* Heatmap on/off toggle (CSS-only switch, plain checkbox under the hood). */
+.heatmap-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  user-select: none;
+  cursor: pointer;
+}
+.heatmap-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.heatmap-toggle__slider {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: #D1D5DB;
+  transition: background 0.18s ease;
+  flex-shrink: 0;
+}
+.heatmap-toggle__slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 0.18s ease;
+}
+.heatmap-toggle input:checked + .heatmap-toggle__slider { background: var(--he-purple); }
+.heatmap-toggle input:checked + .heatmap-toggle__slider::after { transform: translateX(16px); }
+.heatmap-toggle input:focus-visible + .heatmap-toggle__slider {
+  box-shadow: 0 0 0 3px rgba(107, 63, 160, 0.25);
+}
+.heatmap-toggle[hidden] { display: none; }
+
 .heatmap-legend {
   display: flex;
   flex-wrap: wrap;
@@ -798,10 +881,29 @@ main {
 
     <div class="results-grid">
 
-      <!-- 4a. Heatmap card. -->
+      <!-- 4a. Heatmap card.
+           OpenSeadragon mounts inside #heatmap-viewer and stacks two layers:
+             1. the raw slide thumbnail (base)
+             2. the transparent class-coloured overlay (toggleable)
+           The "Heatmap" switch toggles overlay opacity, which preserves the
+           current zoom / pan state because the viewport is left untouched. -->
       <div class="card card--feature heatmap-card">
-        <h2 class="card__title">Tissue Heatmap</h2>
-        <div class="heatmap-img-wrap">
+        <div class="heatmap-card__head">
+          <h2 class="card__title">Tissue Heatmap</h2>
+          <label class="heatmap-toggle" id="heatmap-toggle"
+                 title="Show or hide the colour-coded tissue overlay">
+            <span>Heatmap</span>
+            <input type="checkbox" id="heatmap-toggle-input"
+                   role="switch" aria-label="Toggle heatmap overlay" checked />
+            <span class="heatmap-toggle__slider" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div id="heatmap-viewer" class="heatmap-viewer"
+             aria-label="Whole-slide heatmap viewer"></div>
+        <!-- Legacy fallback used only if the backend hasn't been updated and
+             didn't return a separate thumbnail/overlay pair.  Hidden by
+             default; renderHeatmap() un-hides it when needed. -->
+        <div class="heatmap-img-wrap hidden" id="heatmap-fallback-wrap">
           <img id="heatmap-img" class="heatmap-img" alt="Tissue heatmap" />
         </div>
         <div class="heatmap-legend" id="heatmap-legend"></div>
@@ -1237,11 +1339,198 @@ main {
       ).join("");
   }
 
-  /** 4a. Heatmap image + inline legend row. */
+  /* ─── OpenSeadragon viewer wrapper ──────────────────────────────────────
+     Encapsulates initialization, layer management, and the heatmap toggle
+     so renderHeatmap() stays a thin orchestrator.  Implemented as an IIFE
+     module to match the rest of this file (no React, no build step).
+
+     Layer model
+     -----------
+     OpenSeadragon's `world` holds an ordered list of TiledImage objects.
+     We add two "simple-image" tile sources sized 1x1 in viewport units,
+     so they automatically register at the same viewport bounds and
+     overlap pixel-perfectly (they are rendered from the same thumbnail
+     dimensions on the backend).
+
+       index 0 → base   (raw slide thumbnail)
+       index 1 → overlay (transparent RGBA class-coloured map)
+
+     The "Heatmap" toggle calls `overlayItem.setOpacity(0|1)` which never
+     touches the viewport — zoom level and pan position are preserved
+     between toggles.
+
+     Re-running /analyze tears the viewer down (`destroy()`) and rebuilds,
+     freeing the WebGL/canvas context held by the previous instance.
+     ────────────────────────────────────────────────────────────────────── */
+  const WsiViewer = (() => {
+    let viewer       = null;
+    let baseItem     = null;
+    let overlayItem  = null;
+    let overlayShown = true;
+
+    /** Tear down the current viewer if any.  Safe to call repeatedly. */
+    function destroy() {
+      if (viewer) {
+        try { viewer.destroy(); } catch (_) { /* OSD swallows its own errs */ }
+      }
+      viewer = baseItem = overlayItem = null;
+    }
+
+    /**
+     * Mount a new OpenSeadragon viewer in `containerId` showing `baseUrl`
+     * with `overlayUrl` (optional) on top.  Both URLs should point at PNGs
+     * with identical pixel dimensions to guarantee alignment.
+     */
+    function init({ containerId, baseUrl, overlayUrl }) {
+      destroy();
+
+      if (typeof OpenSeadragon !== "function") {
+        // Library failed to load (offline, blocked, etc).  The caller's
+        // fallback path will swap in the legacy <img>.
+        return false;
+      }
+
+      viewer = OpenSeadragon({
+        id: containerId,
+        // cdnjs hosts the matching button-icon set (zoom, home, fullpage…).
+        prefixUrl:
+          "https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.0/images/",
+
+        // Visible UI: built-in zoom in/out, home (reset view), and full page.
+        showNavigationControl: true,
+        showZoomControl:       true,
+        showHomeControl:       true,
+        showFullPageControl:   true,
+        showRotationControl:   false,
+        showNavigator:         false,
+
+        // Smooth zoom and pan.
+        animationTime:    0.6,
+        springStiffness:  7.0,
+        blendTime:        0.1,
+        immediateRender:  false,
+
+        // Mouse: wheel = zoom, drag = pan, double-click = zoom in.
+        gestureSettingsMouse: {
+          scrollToZoom: true,
+          clickToZoom:  false,
+          dblClickToZoom: true,
+          dragToPan:    true,
+          flickEnabled: true,
+        },
+        // Touch: pinch zoom + flick pan, double-tap zoom.
+        gestureSettingsTouch: {
+          scrollToZoom: false,
+          clickToZoom:  false,
+          dblClickToZoom: true,
+          pinchToZoom:  true,
+          dragToPan:    true,
+          flickEnabled: true,
+        },
+
+        // Keep the image roughly in view; allow modest over-zoom for detail.
+        constrainDuringPan: true,
+        visibilityRatio:    0.7,
+        minZoomImageRatio:  0.9,
+        maxZoomPixelRatio:  4,
+      });
+
+      // Layer 0 — base thumbnail.
+      viewer.addTiledImage({
+        tileSource: { type: "image", url: baseUrl },
+        opacity:    1,
+        success: (e) => { baseItem = e.item; },
+      });
+
+      // Layer 1 — colour-coded overlay (optional).
+      if (overlayUrl) {
+        viewer.addTiledImage({
+          tileSource: { type: "image", url: overlayUrl },
+          opacity:    overlayShown ? 1 : 0,
+          success: (e) => {
+            overlayItem = e.item;
+            // Make sure overlay is rendered on top of the base, even if its
+            // load resolves before the base's.
+            try { viewer.world.setItemIndex(overlayItem,
+                                             viewer.world.getItemCount() - 1); }
+            catch (_) { /* fewer than 2 items yet — fine */ }
+          },
+        });
+      }
+
+      return true;
+    }
+
+    /**
+     * Show or hide the heatmap overlay layer without resetting the viewport.
+     * Calling before the overlay finishes loading just records the intent;
+     * the loader's success callback will pick up the latest value.
+     */
+    function setOverlayVisible(visible) {
+      overlayShown = !!visible;
+      if (overlayItem) overlayItem.setOpacity(overlayShown ? 1 : 0);
+    }
+
+    return { init, destroy, setOverlayVisible };
+  })();
+
+  /** 4a. Heatmap viewer + inline legend row.
+   *  Prefers the layered OpenSeadragon viewer when the backend supplies
+   *  `thumbnail_url` and `overlay_url`.  Falls back to the legacy single
+   *  composite PNG (`heatmap_url`) if the backend hasn't been updated or
+   *  if OpenSeadragon failed to load.
+   */
   function renderHeatmap(r) {
-    const img = document.getElementById("heatmap-img");
-    // Cache-bust so re-analysing the same slide doesn't show a stale image.
-    img.src = `${API_URL}${r.heatmap_url}?t=${Date.now()}`;
+    const viewerEl     = document.getElementById("heatmap-viewer");
+    const fallbackWrap = document.getElementById("heatmap-fallback-wrap");
+    const fallbackImg  = document.getElementById("heatmap-img");
+    const toggleLabel  = document.getElementById("heatmap-toggle");
+    const toggleInput  = document.getElementById("heatmap-toggle-input");
+
+    // Cache-bust query string so re-analysing the same slide doesn't show
+    // browser-cached PNGs from the previous run.
+    const cacheBust = `?t=${Date.now()}`;
+    const baseUrl    = r.thumbnail_url ? `${API_URL}${r.thumbnail_url}${cacheBust}` : null;
+    const overlayUrl = r.overlay_url   ? `${API_URL}${r.overlay_url}${cacheBust}`   : null;
+    const legacyUrl  = r.heatmap_url   ? `${API_URL}${r.heatmap_url}${cacheBust}`   : null;
+
+    let useOsd = false;
+    if (baseUrl) {
+      useOsd = WsiViewer.init({
+        containerId: "heatmap-viewer",
+        baseUrl,
+        overlayUrl,
+      });
+    }
+
+    if (useOsd) {
+      // OpenSeadragon path.
+      viewerEl.classList.remove("hidden");
+      fallbackWrap.classList.add("hidden");
+      // Toggle is only meaningful when both layers exist.
+      if (overlayUrl) {
+        toggleLabel.hidden = false;
+        toggleInput.checked = true;
+        WsiViewer.setOverlayVisible(true);
+        toggleInput.onchange = () =>
+          WsiViewer.setOverlayVisible(toggleInput.checked);
+      } else {
+        toggleLabel.hidden = true;
+        toggleInput.onchange = null;
+      }
+    } else {
+      // Legacy fallback: hide the viewer, show the original composite PNG.
+      WsiViewer.destroy();
+      viewerEl.classList.add("hidden");
+      toggleLabel.hidden = true;
+      toggleInput.onchange = null;
+      if (legacyUrl) {
+        fallbackImg.src = legacyUrl;
+        fallbackWrap.classList.remove("hidden");
+      } else {
+        fallbackWrap.classList.add("hidden");
+      }
+    }
 
     document.getElementById("heatmap-legend").innerHTML =
       CLASS_ORDER.map((cls) => `
@@ -1466,6 +1755,10 @@ main {
     document.getElementById("dropzone").classList.remove("has-file");
 
     if (state.chart) { state.chart.destroy(); state.chart = null; }
+
+    // Free the OpenSeadragon canvas when leaving the results section so we
+    // don't keep a stale viewer alive between analyses.
+    WsiViewer.destroy();
 
     applyMode();
   }
